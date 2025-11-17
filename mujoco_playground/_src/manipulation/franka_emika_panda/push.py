@@ -1,18 +1,4 @@
-# Copyright 2025 DeepMind Technologies Limited
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
-"""Bring a box to a target and orientation."""
+"""Push a box to a target and orientation."""
 
 from typing import Any, Dict, Optional, Union
 
@@ -23,9 +9,23 @@ from mujoco import mjx
 from mujoco.mjx._src import math
 from mujoco_playground._src import mjx_env
 from mujoco_playground._src.manipulation.franka_emika_panda import panda
+from mujoco_playground._src.manipulation.franka_emika_panda.panda import _ARM_JOINTS, _FINGER_JOINTS
 from mujoco_playground._src.mjx_env import State  # pylint: disable=g-importing-member
 import numpy as np
 
+INIT_POS = [0.5, 0, 0]
+
+MIN_SIZE = 0.005 #MuJoCo uses half sizes
+MAX_SIZE = 0.05
+
+MIN_MASS = 0.01
+MAX_MASS = 20
+MIN_SLIDE = 0.5
+MAX_SLIDE = 2
+MIN_ROLL = 0.01
+MAX_ROLL = 0.1
+MIN_SPIN = 0.001
+MAX_SPIN = 0.01
 
 def default_config() -> config_dict.ConfigDict:
   """Returns the default config for bring_to_target tasks."""
@@ -54,29 +54,33 @@ def default_config() -> config_dict.ConfigDict:
   return config
 
 
-class PandaPickCube(panda.PandaBase):
+class PandaPush(panda.PandaBase):
   """Bring a box to a target."""
+  geometries = ["box", "capsule", "sphere"]
 
   def __init__(
       self,
       config: config_dict.ConfigDict = default_config(),
       config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
       sample_orientation: bool = False,
+      domain_randomization: bool = True,
+      geometry: str = "box",
   ):
     xml_path = (
         mjx_env.ROOT_PATH
         / "manipulation"
         / "franka_emika_panda"
         / "xmls"
-        / "mjx_single_cube.xml"
+        / "mjx_push.xml"
     )
     super().__init__(
         xml_path,
         config,
         config_overrides,
     )
-    self._post_init(obj_name="box", keyframe="home")
+    self._post_init(obj_name=geometry, keyframe="home") #this method overides the _post_init of the base panda env.
     self._sample_orientation = sample_orientation
+    self._domain_randomization = domain_randomization
 
     # Contact sensor IDs.
     self._floor_hand_found_sensor = [
@@ -84,10 +88,39 @@ class PandaPickCube(panda.PandaBase):
         for geom in ["left_finger_pad", "right_finger_pad", "hand_capsule"]
     ]
 
+  def _domain_randomization(self, geom: str, rng: jax.random.PRNGKey):
+    if geom=="box":
+        #Move other objects far away
+        self._mj_model.body("capsule").pos = [100, 100, 0]
+        self._mj_model.body("sphere").pos = [101, 100, 0]
+        #Randomize Size (because its geometry based)
+        size = jax.random.uniform(rng, (3,), minval=MIN_SIZE, maxval=MAX_SIZE)
+        height_offset = size[-1]
+        self._mj_model.geom(geom).size = size
+        pass
+    elif geom=="capsule":
+        pass
+    elif geom=="sphere":
+        pass
+    #Randomize Mass
+    self._mj_model.body(geom).mass = jax.random.uniform(rng, (1,), minval=MIN_MASS, maxval=MAX_MASS)
+    #Randomize Friction
+    self._mj_model.geom(geom).friction = jax.random.uniform(rng, (3,), 
+                                                            minval=[MIN_SLIDE, MIN_ROLL, MIN_SPIN],
+                                                            maxval=[MAX_SLIDE, MAX_ROLL, MAX_SPIN])
+
   def reset(self, rng: jax.Array) -> State:
     rng, rng_box, rng_target = jax.random.split(rng, 3)
 
-    # intialize box position
+    if self._domain_randomization:
+        geom_idx = jax.random.choice(rng_box, len(self.geometries))
+        geom = self.geometries[geom_idx]
+        self._set_obj_geom(geom)
+        self._mj_model.geom(geom).size = 0.2
+        self._mj_model.body(geom).pos = [0.2, 0.2, 20]
+        
+
+    # intialize box(object) position
     box_pos = (
         jax.random.uniform(
             rng_box,
@@ -96,6 +129,7 @@ class PandaPickCube(panda.PandaBase):
             maxval=jp.array([0.2, 0.2, 0.0]),
         )
         + self._init_obj_pos
+        + jp.array([0,0,0.2])
     )
 
     # initialize target position
@@ -110,13 +144,13 @@ class PandaPickCube(panda.PandaBase):
     )
 
     target_quat = jp.array([1.0, 0.0, 0.0, 0.0], dtype=float)
-    if self._sample_orientation:
-      # sample a random direction
-      rng, rng_axis, rng_theta = jax.random.split(rng, 3)
-      perturb_axis = jax.random.uniform(rng_axis, (3,), minval=-1, maxval=1)
-      perturb_axis = perturb_axis / math.norm(perturb_axis)
-      perturb_theta = jax.random.uniform(rng_theta, maxval=np.deg2rad(45))
-      target_quat = math.axis_angle_to_quat(perturb_axis, perturb_theta)
+    #if self._sample_orientation:
+    #  # sample a random direction
+    #  rng, rng_axis, rng_theta = jax.random.split(rng, 3)
+    #  perturb_axis = jax.random.uniform(rng_axis, (3,), minval=-1, maxval=1)
+    #  perturb_axis = perturb_axis / math.norm(perturb_axis)
+    #  perturb_theta = jax.random.uniform(rng_theta, maxval=np.deg2rad(45))
+    #  target_quat = math.axis_angle_to_quat(perturb_axis, perturb_theta)
 
     # initialize data
     init_q = (
@@ -139,7 +173,6 @@ class PandaPickCube(panda.PandaBase):
         mocap_pos=data.mocap_pos.at[self._mocap_target, :].set(target_pos),
         mocap_quat=data.mocap_quat.at[self._mocap_target, :].set(target_quat),
     )
-
     # initialize env state and info
     metrics = {
         "out_of_bounds": jp.array(0.0, dtype=float),
@@ -235,14 +268,100 @@ class PandaPickCube(panda.PandaBase):
     ])
 
     return obs
+  
+  def _post_init(self, obj_name: str, keyframe: str):
+    all_joints = _ARM_JOINTS + _FINGER_JOINTS
+    self._robot_arm_qposadr = np.array([
+        self._mj_model.jnt_qposadr[self._mj_model.joint(j).id]
+        for j in _ARM_JOINTS
+    ])
+    self._robot_qposadr = np.array([
+        self._mj_model.jnt_qposadr[self._mj_model.joint(j).id]
+        for j in all_joints
+    ])
+    self._gripper_site = self._mj_model.site("gripper").id
+    self._left_finger_geom = self._mj_model.geom("left_finger_pad").id
+    self._right_finger_geom = self._mj_model.geom("right_finger_pad").id
+    self._hand_geom = self._mj_model.geom("hand_capsule").id
+
+    #Init body ids and qposadrs for all geometries
+    self._box_body = self._mj_model.body("box").id
+    self._box_qposadr = self._mj_model.jnt_qposadr[
+        self._mj_model.body("box").jntadr[0]
+    ]
+    self._capsule_body = self._mj_model.body("capsule").id
+    self._capsule_qposadr = self._mj_model.jnt_qposadr[
+        self._mj_model.body("capsule").jntadr[0]
+    ]
+    self._sphere_body = self._mj_model.body("sphere").id
+    self._sphere_qposadr = self._mj_model.jnt_qposadr[
+        self._mj_model.body("sphere").jntadr[0]
+    ]
+    self._box_mocap = self._mj_model.body("box_target").mocapid
+    self._capsule_mocap = self._mj_model.body("capsule_target").mocapid
+    self._sphere_mocap = self._mj_model.body("sphere_target").mocapid
+
+    #Set obj_name as default object and set mocap target to the corresponding geom
+    self._set_obj_geom(obj_name)
+
+    self._floor_geom = self._mj_model.geom("floor").id
+    self._init_q = self._mj_model.keyframe(keyframe).qpos
+    self._init_obj_pos = jp.array(
+        INIT_POS,
+        dtype=jp.float32,
+    )
+    self._init_ctrl = self._mj_model.keyframe(keyframe).ctrl
+    self._lowers, self._uppers = self._mj_model.actuator_ctrlrange.T
+
+  def _set_obj_geom(self, obj_name: str):
+    if obj_name not in self.geometries:
+      raise Exception(f"No geometry with name '{obj_name}' in list of supported geometries: {self.geometries}")
+    elif obj_name == self.geometries[0]:
+      self._obj_body = self._box_body
+      self._obj_qposadr = self._box_qposadr
+      self._mocap_target = self._box_mocap
+    elif obj_name == self.geometries[1]:
+      self._obj_body = self._capsule_body
+      self._obj_qposadr = self._capsule_qposadr
+      self._mocap_target = self._capsule_mocap
+    elif obj_name == self.geometries[2]:
+      self._obj_body = self._sphere_body
+      self._obj_qposadr = self._sphere_qposadr
+      self._mocap_target = self._sphere_mocap
+
+  def _randomize_domain(self, geom: str, data: mjx.Data, rng: jax.random.PRNGKey):
+
+    if geom==self.geometrie[0]:
+      #Set all other objs out of range
+      #data.
+      #Set obj to init pos
+      #rotate capsules to be on side
+      #randomize rotation
+      #random init pos
+      #random target pos
+      #randomize friction
+      #randomize size
+      pass
 
 
-class PandaPickCubeOrientation(PandaPickCube):
-  """Bring a box to a target and orientation."""
 
-  def __init__(
-      self,
-      config: config_dict.ConfigDict = default_config(),
-      config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
-  ):
-    super().__init__(config, config_overrides, sample_orientation=True)
+import os
+xla_flags = os.environ.get("XLA_FLAGS", "")
+xla_flags += " --xla_gpu_triton_gemm_any=True"
+os.environ["XLA_FLAGS"] = xla_flags
+
+env = PandaPush(geometry="capsule")
+state = env.reset(jax.random.PRNGKey(42))
+traj = []
+traj.append(state)
+
+#for _ in range(0):
+#  print(f"Step: {_}")
+#  state = env.step(state, jp.array([0,0,0,0,0,0,0,0], dtype=jp.float32))
+#  traj.append(state)
+
+images = env.render(traj)
+
+import matplotlib.pyplot as plt
+plt.imshow(images[0])
+plt.show()
