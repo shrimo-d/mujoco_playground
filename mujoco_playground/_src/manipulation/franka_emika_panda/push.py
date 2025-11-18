@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional, Union
 import jax
 import jax.numpy as jp
 from ml_collections import config_dict
-from mujoco import mjx
+from mujoco import mjx, mju_euler2Quat, mju_mulQuat
 from mujoco.mjx._src import math
 from mujoco_playground._src import mjx_env
 from mujoco_playground._src.manipulation.franka_emika_panda import panda
@@ -21,7 +21,7 @@ MAX_SIZE = 0.05
 MIN_MASS = 0.01
 MAX_MASS = 20
 MIN_SLIDE = 0.5
-MAX_SLIDE = 2
+MAX_SLIDE = 2.0
 MIN_ROLL = 0.01
 MAX_ROLL = 0.1
 MIN_SPIN = 0.001
@@ -88,40 +88,73 @@ class PandaPush(panda.PandaBase):
         for geom in ["left_finger_pad", "right_finger_pad", "hand_capsule"]
     ]
 
-  def _domain_randomization(self, geom: str, rng: jax.random.PRNGKey):
+  def _randomize_domain(self, geom: str, rng: jax.random.PRNGKey):
+    quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
     if geom=="box":
         #Move other objects far away
         self._mj_model.body("capsule").pos = [100, 100, 0]
         self._mj_model.body("sphere").pos = [101, 100, 0]
+        self._mj_model.body("capsule_target").pos = [102, 100, 0]
+        self._mj_model.body("sphere_target").pos = [103, 100, 0]
         #Randomize Size (because its geometry based)
         size = jax.random.uniform(rng, (3,), minval=MIN_SIZE, maxval=MAX_SIZE)
         height_offset = size[-1]
-        self._mj_model.geom(geom).size = size
-        pass
+        #Randomly rotate around z-axis
+
     elif geom=="capsule":
-        pass
+        #Move other objects far away
+        self._mj_model.body("box").pos = [100, 100, 0]
+        self._mj_model.body("sphere").pos = [101, 100, 0]
+        self._mj_model.body("box_target").pos = [102, 100, 0]
+        self._mj_model.body("sphere_target").pos = [103, 100, 0]
+        #Randomize Size (because its geometry based)
+        size = jax.random.uniform(rng, (2,), minval=MIN_SIZE, maxval=MAX_SIZE)
+        #Flip capsule on the side
+        quat = jp.array([jp.sqrt(0.5), jp.sqrt(0.5), 0.0, 0.0], dtype=float)
+        height_offset = size[0] #because capsule is defined by giving radius followed by cylinder halfheight
+
     elif geom=="sphere":
-        pass
+        #Move other objects far away
+        self._mj_model.body("box").pos = [100, 100, 0]
+        self._mj_model.body("capsule").pos = [101, 100, 0]
+        self._mj_model.body("box_target").pos = [102, 100, 0]
+        self._mj_model.body("capsule_target").pos = [103, 100, 0]
+        #Randomize Size (because its geometry based)
+        size = jax.random.uniform(rng, (1,), minval=MIN_SIZE, maxval=MAX_SIZE)
+        height_offset = size[0]
+
+    #Set size
+    self._mj_model.geom(geom).size = size
+    self._mj_model.geom(f"{geom}_target").size = size
     #Randomize Mass
     self._mj_model.body(geom).mass = jax.random.uniform(rng, (1,), minval=MIN_MASS, maxval=MAX_MASS)
     #Randomize Friction
-    self._mj_model.geom(geom).friction = jax.random.uniform(rng, (3,), 
-                                                            minval=[MIN_SLIDE, MIN_ROLL, MIN_SPIN],
-                                                            maxval=[MAX_SLIDE, MAX_ROLL, MAX_SPIN])
+    self._mj_model.geom(geom).friction = jax.random.uniform(rng, 
+                                                            (3,), 
+                                                            minval=jp.array([MIN_SLIDE, MIN_ROLL, MIN_SPIN]),
+                                                            maxval=jp.array([MAX_SLIDE, MAX_ROLL, MAX_SPIN]))
+    #Randomly rotate around z-axis
+    z_quat = np.zeros((4,1))
+    z_angle = jax.random.uniform(rng, (3,), minval=jp.array([0, 0, -np.pi]), maxval=jp.array([0,0,np.pi]))
+    mju_euler2Quat(quat=z_quat, euler=np.array(z_angle), seq="XYZ")
+    mju_mulQuat(quat, z_quat, quat)  
+    return height_offset, jp.array(quat)
 
   def reset(self, rng: jax.Array) -> State:
     rng, rng_box, rng_target = jax.random.split(rng, 3)
+    height_offset = 0
+    quat = jp.array([1,0,0,0], dtype=float)
 
     if self._domain_randomization:
         geom_idx = jax.random.choice(rng_box, len(self.geometries))
         geom = self.geometries[geom_idx]
         self._set_obj_geom(geom)
-        self._mj_model.geom(geom).size = 0.2
-        self._mj_model.body(geom).pos = [0.2, 0.2, 20]
+        height_offset, quat = self._randomize_domain(geom, rng_box)
+        print(quat)
         
 
     # intialize box(object) position
-    box_pos = (
+    obj_pos = (
         jax.random.uniform(
             rng_box,
             (3,),
@@ -129,7 +162,7 @@ class PandaPush(panda.PandaBase):
             maxval=jp.array([0.2, 0.2, 0.0]),
         )
         + self._init_obj_pos
-        + jp.array([0,0,0.2])
+        + jp.array([0,0,height_offset])
     )
 
     # initialize target position
@@ -137,27 +170,21 @@ class PandaPush(panda.PandaBase):
         jax.random.uniform(
             rng_target,
             (3,),
-            minval=jp.array([-0.2, -0.2, 0.2]),
-            maxval=jp.array([0.2, 0.2, 0.4]),
+            minval=jp.array([-0.2, -0.2, 0.0]),
+            maxval=jp.array([0.2, 0.2, 0.0]),
         )
         + self._init_obj_pos
+        + jp.array([0,0,height_offset])
     )
 
-    target_quat = jp.array([1.0, 0.0, 0.0, 0.0], dtype=float)
-    #if self._sample_orientation:
-    #  # sample a random direction
-    #  rng, rng_axis, rng_theta = jax.random.split(rng, 3)
-    #  perturb_axis = jax.random.uniform(rng_axis, (3,), minval=-1, maxval=1)
-    #  perturb_axis = perturb_axis / math.norm(perturb_axis)
-    #  perturb_theta = jax.random.uniform(rng_theta, maxval=np.deg2rad(45))
-    #  target_quat = math.axis_angle_to_quat(perturb_axis, perturb_theta)
-
-    # initialize data
+    # initialize data and set obj to pos
     init_q = (
         jp.array(self._init_q)
         .at[self._obj_qposadr : self._obj_qposadr + 3]
-        .set(box_pos)
+        .set(obj_pos)
     )
+    # also rotate according to quat
+    init_q = init_q.at[self._obj_qposadr+3 : self._obj_qposadr + 7].set(quat)
     data = mjx_env.make_data(
         self._mj_model,
         qpos=init_q,
@@ -171,7 +198,7 @@ class PandaPush(panda.PandaBase):
     # set target mocap position
     data = data.replace(
         mocap_pos=data.mocap_pos.at[self._mocap_target, :].set(target_pos),
-        mocap_quat=data.mocap_quat.at[self._mocap_target, :].set(target_quat),
+        mocap_quat=data.mocap_quat.at[self._mocap_target, :].set(quat),
     )
     # initialize env state and info
     metrics = {
@@ -329,20 +356,6 @@ class PandaPush(panda.PandaBase):
       self._obj_qposadr = self._sphere_qposadr
       self._mocap_target = self._sphere_mocap
 
-  def _randomize_domain(self, geom: str, data: mjx.Data, rng: jax.random.PRNGKey):
-
-    if geom==self.geometrie[0]:
-      #Set all other objs out of range
-      #data.
-      #Set obj to init pos
-      #rotate capsules to be on side
-      #randomize rotation
-      #random init pos
-      #random target pos
-      #randomize friction
-      #randomize size
-      pass
-
 
 
 import os
@@ -351,7 +364,7 @@ xla_flags += " --xla_gpu_triton_gemm_any=True"
 os.environ["XLA_FLAGS"] = xla_flags
 
 env = PandaPush(geometry="capsule")
-state = env.reset(jax.random.PRNGKey(42))
+state = env.reset(jax.random.PRNGKey(200))
 traj = []
 traj.append(state)
 

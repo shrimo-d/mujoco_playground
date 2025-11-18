@@ -19,13 +19,13 @@
     </body>
 
     <body mocap="true" name="box_target">
-      <geom type="box" size="0.02 0.02 0.03" rgba="1 0 0 0.2" contype="0" conaffinity="0"/>
+      <geom type="box" name="box_target" size="0.02 0.02 0.03" rgba="1 0 0 0.2" contype="0" conaffinity="0"/>
     </body>
     <body mocap="true" name="capsule_target">
-      <geom type="capsule" size="0.02 0.02" rgba="1 0 0 0.2" contype="0" conaffinity="0"/>
+      <geom type="capsule" name="capsule_target" size="0.02 0.02" rgba="1 0 0 0.2" contype="0" conaffinity="0"/>
     </body>
     <body mocap="true" name="sphere_target">
-      <geom type="sphere" size="0.02" rgba="1 0 0 0.2" contype="0" conaffinity="0"/>
+      <geom type="sphere" name="sphere_target" size="0.02" rgba="1 0 0 0.2" contype="0" conaffinity="0"/>
     </body>
   </worldbody>
 
@@ -33,7 +33,7 @@
 
   <keyframe>
     <key name="home"
-      qpos="0 0.3 0 -1.57079 0 2.0 -0.7853 0.04 0.04 0.7 0 0.03 1 0 0 0"
+      qpos="0 0.3 0 -1.57079 0 2.0 -0.7853 0.04 0.04"
       ctrl="0 0.3 0 -1.57079 0 2.0 -0.7853 0.04"/>
     <key name="pickup"
       qpos="0.2897 0.50732 -0.140016 -2.176 -0.0310497 2.51592 -0.49251 0.04 0.0399982 0.511684 0.0645413 0.0298665 0.665781 2.76848e-17 -2.27527e-17 -0.746147"
