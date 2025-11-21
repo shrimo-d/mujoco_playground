@@ -83,10 +83,10 @@ class PandaPush(panda.PandaBase):
     self._domain_randomization = domain_randomization
 
     # Contact sensor IDs.
-    self._floor_hand_found_sensor = [
-        self._mj_model.sensor(f"{geom}_floor_found").id
-        for geom in ["left_finger_pad", "right_finger_pad", "hand_capsule"]
-    ]
+    #self._floor_hand_found_sensor = [
+    #    self._mj_model.sensor(f"{geom}_floor_found").id
+    #    for geom in ["left_finger_pad", "right_finger_pad", "hand_capsule"]
+    #]
 
   def _randomize_domain(self, geom: str, rng: jax.random.PRNGKey):
     quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
@@ -150,10 +150,8 @@ class PandaPush(panda.PandaBase):
         geom = self.geometries[geom_idx]
         self._set_obj_geom(geom)
         height_offset, quat = self._randomize_domain(geom, rng_box)
-        print(quat)
-        
 
-    # intialize box(object) position
+    # intialize object position
     obj_pos = (
         jax.random.uniform(
             rng_box,
@@ -277,39 +275,63 @@ class PandaPush(panda.PandaBase):
         "robot_target_qpos": robot_target_qpos,
     }
     return rewards
-
+  
+  def _get_mask(self, shape: tuple, qvel: bool = False):
+    """Creates a mask for the self.qpos and self.qvel array to exclude the unused geometries
+    Args:
+    shape: tuple -> The shape of qpos and qvel
+    qvel: bool -> Whether or not mask for qvel is wanted
+    Returns:
+    mask: jp.array -> mask of the indizes"""
+    offset = 6 if qvel else 7
+    capsule_mod = self._capsule_qposadr-1 if qvel else self._capsule_qposadr #in qvel index starts 1 earlier, as it is the second geom
+    sphere_mod = self._sphere_qposadr-2 if qvel else self._sphere_qposadr #in qvel index starts 2 earlier, as it is the third geom
+    if self._obj_body == self._box_body:
+        idx = list(range(capsule_mod, capsule_mod+offset))
+        idx.extend(list(range(sphere_mod, sphere_mod+offset)))
+    elif self._obj_body == self._capsule_body:
+        idx = list(range(self._box_qposadr, self._box_qposadr+offset))
+        idx.extend(list(range(sphere_mod, sphere_mod+offset)))
+    elif self._obj_body == self._sphere_body:
+        idx = list(range(self._box_qposadr, self._box_qposadr+offset))
+        idx.extend(list(range(capsule_mod, capsule_mod+offset)))
+    else:
+       raise Exception("self._obj_body does not contain id of legal object")
+    exclude = jp.array(idx)
+    mask = jp.ones(shape, dtype=bool).at[exclude].set(False)
+    return mask
+  
   def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
-    gripper_pos = data.site_xpos[self._gripper_site]
-    gripper_mat = data.site_xmat[self._gripper_site].ravel()
+    #gripper_pos = data.site_xpos[self._gripper_site] #probably irrelevant for push task, as gripper is assumed fixed?
+    #gripper_mat = data.site_xmat[self._gripper_site].ravel() #probably also irrelevant?
     target_mat = math.quat_to_mat(data.mocap_quat[self._mocap_target])
+    #Mask out all unused objects from qpos and qvel
+    qpos_mask = self._get_mask(data.qpos.shape)
+    qvel_mask = self._get_mask(data.qvel.shape, qvel=True)
+
     obs = jp.concatenate([
-        data.qpos,
-        data.qvel,
-        gripper_pos,
-        gripper_mat[3:],
+        data.qpos[qpos_mask],
+        data.qvel[qvel_mask],
+        #gripper_pos,
+        #gripper_mat[3:],
         data.xmat[self._obj_body].ravel()[3:],
-        data.xpos[self._obj_body] - data.site_xpos[self._gripper_site],
+        #data.xpos[self._obj_body] - data.site_xpos[self._gripper_site],
         info["target_pos"] - data.xpos[self._obj_body],
         target_mat.ravel()[:6] - data.xmat[self._obj_body].ravel()[:6],
-        data.ctrl - data.qpos[self._robot_qposadr[:-1]],
+        data.ctrl - data.qpos[self._robot_qposadr],
     ])
 
     return obs
   
   def _post_init(self, obj_name: str, keyframe: str):
-    all_joints = _ARM_JOINTS + _FINGER_JOINTS
     self._robot_arm_qposadr = np.array([
         self._mj_model.jnt_qposadr[self._mj_model.joint(j).id]
         for j in _ARM_JOINTS
     ])
     self._robot_qposadr = np.array([
         self._mj_model.jnt_qposadr[self._mj_model.joint(j).id]
-        for j in all_joints
+        for j in _ARM_JOINTS
     ])
-    self._gripper_site = self._mj_model.site("gripper").id
-    self._left_finger_geom = self._mj_model.geom("left_finger_pad").id
-    self._right_finger_geom = self._mj_model.geom("right_finger_pad").id
-    self._hand_geom = self._mj_model.geom("hand_capsule").id
 
     #Init body ids and qposadrs for all geometries
     self._box_body = self._mj_model.body("box").id
@@ -364,7 +386,7 @@ xla_flags += " --xla_gpu_triton_gemm_any=True"
 os.environ["XLA_FLAGS"] = xla_flags
 
 env = PandaPush(geometry="capsule")
-state = env.reset(jax.random.PRNGKey(200))
+state = env.reset(jax.random.PRNGKey(210))
 traj = []
 traj.append(state)
 
