@@ -9,11 +9,13 @@ from mujoco import mjx, mju_euler2Quat, mju_mulQuat
 from mujoco.mjx._src import math
 from mujoco_playground._src import mjx_env
 from mujoco_playground._src.manipulation.franka_emika_panda import panda
-from mujoco_playground._src.manipulation.franka_emika_panda.panda import _ARM_JOINTS, _FINGER_JOINTS
+from mujoco_playground._src.manipulation.franka_emika_panda.panda import _ARM_JOINTS
 from mujoco_playground._src.mjx_env import State  # pylint: disable=g-importing-member
 import numpy as np
 
 INIT_POS = [0.5, 0, 0]
+
+ENDEFFECTOR_HEIGHT = 0.07 #m = 70 mm
 
 MIN_SIZE = 0.005 #MuJoCo uses half sizes
 MAX_SIZE = 0.05
@@ -83,10 +85,10 @@ class PandaPush(panda.PandaBase):
     self._domain_randomization = domain_randomization
 
     # Contact sensor IDs.
-    #self._floor_hand_found_sensor = [
-    #    self._mj_model.sensor(f"{geom}_floor_found").id
-    #    for geom in ["left_finger_pad", "right_finger_pad", "hand_capsule"]
-    #]
+    self._floor_endeffector_found_sensor = [
+      self._mj_model.sensor(f"endeffector_{name}_floor_found").id
+      for name in ["head", "stick"]
+    ]
 
   def _randomize_domain(self, geom: str, rng: jax.random.PRNGKey):
     quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
@@ -216,21 +218,22 @@ class PandaPush(panda.PandaBase):
 
     data = mjx_env.step(self._mjx_model, state.data, ctrl, self.n_substeps)
 
-    raw_rewards = self._get_reward(data, state.info)
-    rewards = {
-        k: v * self._config.reward_config.scales[k]
-        for k, v in raw_rewards.items()
-    }
-    reward = jp.clip(sum(rewards.values()), -1e4, 1e4)
+    #raw_rewards = self._get_reward(data, state.info)
+    #rewards = {
+    #    k: v * self._config.reward_config.scales[k]
+    #    for k, v in raw_rewards.items()
+    #}
+    #reward = jp.clip(sum(rewards.values()), -1e4, 1e4)
+    reward = 1
     box_pos = data.xpos[self._obj_body]
     out_of_bounds = jp.any(jp.abs(box_pos) > 1.0)
     out_of_bounds |= box_pos[2] < 0.0
     done = out_of_bounds | jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any()
     done = done.astype(float)
 
-    state.metrics.update(
-        **raw_rewards, out_of_bounds=out_of_bounds.astype(float)
-    )
+    #state.metrics.update(
+    #    **raw_rewards, out_of_bounds=out_of_bounds.astype(float)
+    #)
 
     obs = self._get_obs(data, state.info)
     state = State(data, obs, reward, done, state.metrics, state.info)
@@ -302,6 +305,10 @@ class PandaPush(panda.PandaBase):
     return mask
   
   def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
+    print(data.xpos[self._endeffector_geom])
+    for id in self._floor_endeffector_found_sensor:
+       if data.sensordata[id] > 0:
+          print(f"{id} touched the floor!")
     #gripper_pos = data.site_xpos[self._gripper_site] #probably irrelevant for push task, as gripper is assumed fixed?
     #gripper_mat = data.site_xmat[self._gripper_site].ravel() #probably also irrelevant?
     target_mat = math.quat_to_mat(data.mocap_quat[self._mocap_target])
@@ -332,6 +339,9 @@ class PandaPush(panda.PandaBase):
         self._mj_model.jnt_qposadr[self._mj_model.joint(j).id]
         for j in _ARM_JOINTS
     ])
+    #Init endeffector id and qposadr
+    self._endeffector_geom = self._mj_model.body("endeffector").id
+    self._endeffector_qposadr = self._mj_model.jnt_qposadr[self._mj_model.body("endeffector").jntadr[0]]
 
     #Init body ids and qposadrs for all geometries
     self._box_body = self._mj_model.body("box").id
@@ -378,6 +388,14 @@ class PandaPush(panda.PandaBase):
       self._obj_qposadr = self._sphere_qposadr
       self._mocap_target = self._sphere_mocap
 
+  def _rew_dist(self, data: mjx.Data, info: Dict[str, Any]) -> float:
+    pass
+  
+  def _rew_exact(self, data: mjx.Data, info: Dict[str, Any]) -> float:
+    pass
+  
+  def _rew_push(self, data: mjx.Data, info: Dict[str, Any]) -> float:
+    pass
 
 
 import os
@@ -390,13 +408,57 @@ state = env.reset(jax.random.PRNGKey(210))
 traj = []
 traj.append(state)
 
-#for _ in range(0):
-#  print(f"Step: {_}")
-#  state = env.step(state, jp.array([0,0,0,0,0,0,0,0], dtype=jp.float32))
-#  traj.append(state)
+instructions = [
+   jp.array([50, 50, 0, -100, 0, 0, 0]),
+   jp.array([50, 50, 0, -100, 0, 0, 0]),
+   jp.array([50, 50, 0, -100, 0, 0, 0]),
+   jp.array([50, 50, 0, -100, 0, 0, 0]),
+   jp.array([50, 50, 0, 0, 0, 10, 0]),
+   jp.array([50, 50, 0, 0, 0, 10, 0]),
+   jp.array([100, 0, 0, 0, 0, 10, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+   jp.array([100, 0, 0, 0, 0, 0, 0]),
+]
+
+for ins in instructions:
+  state = env.step(state, ins)
+  traj.append(state)
 
 images = env.render(traj)
-
 import matplotlib.pyplot as plt
-plt.imshow(images[0])
-plt.show()
+
+for im in images:
+    plt.imshow(im)
+    plt.show()

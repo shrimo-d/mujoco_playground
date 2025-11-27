@@ -1,0 +1,6 @@
+<mujoco>
+ <sensor>
+  <contact name="endeffector_head_floor_found" geom1="floor" geom2="endeffector_head" reduce="mindist" num="1" data="found"/>
+  <contact name="endeffector_stick_floor_found" geom1="floor" geom2="endeffector_stick" reduce="mindist" num="1" data="found"/>
+ </sensor>
+</mujoco>
