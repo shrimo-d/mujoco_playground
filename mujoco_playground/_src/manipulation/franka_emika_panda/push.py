@@ -59,6 +59,14 @@ def default_config() -> config_dict.ConfigDict:
 class PandaPush(panda.PandaBase):
   """Bring a box to a target."""
   geometries = ["box", "capsule", "sphere"]
+  lambda_c = 0
+  lambda_l = 0
+  lambda_s = 0
+  lambda_n = 0
+  lambda_q = 0
+  lambda_e = 0
+  lambda_r = 0
+  epsilon = 0
 
   def __init__(
       self,
@@ -89,6 +97,8 @@ class PandaPush(panda.PandaBase):
       self._mj_model.sensor(f"endeffector_{name}_floor_found").id
       for name in ["head", "stick"]
     ]
+    # Init last action
+    self.last_action = jp.zeros(7)
 
   def _randomize_domain(self, geom: str, rng: jax.random.PRNGKey):
     quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
@@ -238,6 +248,9 @@ class PandaPush(panda.PandaBase):
     obs = self._get_obs(data, state.info)
     state = State(data, obs, reward, done, state.metrics, state.info)
 
+    #Set action to self.last_action
+    self.last_action = action
+
     return state
 
   def _get_reward(self, data: mjx.Data, info: Dict[str, Any]) -> Dict[str, Any]:
@@ -305,10 +318,11 @@ class PandaPush(panda.PandaBase):
     return mask
   
   def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
-    print(data.xpos[self._endeffector_geom])
+    print(data.xpos[self._endeffector_body])
     for id in self._floor_endeffector_found_sensor:
        if data.sensordata[id] > 0:
           print(f"{id} touched the floor!")
+    print(data)
     #gripper_pos = data.site_xpos[self._gripper_site] #probably irrelevant for push task, as gripper is assumed fixed?
     #gripper_mat = data.site_xmat[self._gripper_site].ravel() #probably also irrelevant?
     target_mat = math.quat_to_mat(data.mocap_quat[self._mocap_target])
@@ -340,7 +354,7 @@ class PandaPush(panda.PandaBase):
         for j in _ARM_JOINTS
     ])
     #Init endeffector id and qposadr
-    self._endeffector_geom = self._mj_model.body("endeffector").id
+    self._endeffector_body = self._mj_model.body("endeffector").id
     self._endeffector_qposadr = self._mj_model.jnt_qposadr[self._mj_model.body("endeffector").jntadr[0]]
 
     #Init body ids and qposadrs for all geometries
@@ -388,14 +402,43 @@ class PandaPush(panda.PandaBase):
       self._obj_qposadr = self._sphere_qposadr
       self._mocap_target = self._sphere_mocap
 
-  def _rew_dist(self, data: mjx.Data, info: Dict[str, Any]) -> float:
-    pass
+  def _r_dist(self, data: mjx.Data, info: Dict[str, Any]) -> float:
+    ee_obj = jp.square(data.xpos[self._endeffector_body] - data.xpos[self._obj_body]).sum()
+    return self.lambda_r / (1+ee_obj)
   
-  def _rew_exact(self, data: mjx.Data, info: Dict[str, Any]) -> float:
-    pass
+  def _r_exact(self, data: mjx.Data, info: Dict[str, Any]) -> float:
+    norm = jp.linalg.norm(data.xpos[self._endeffector_body]-data.xpos[self._obj_body])
+    if norm < self.epsilon:
+       return self.lambda_e + 1/(1+100*data.qvel[self._robot_qposadr])
+    else:
+       return 0
   
-  def _rew_push(self, data: mjx.Data, info: Dict[str, Any]) -> float:
-    pass
+  def _r_push(self, data: mjx.Data, info: Dict[str, Any]) -> float:
+    obj_goal = jp.square(data.qpos[self._obj_qposadr:self._obj_qposadr+3] - info["target_pos"]).sum()
+    return self.lambda_r / (1+obj_goal)
+
+  def _r_vel(self, data: mjx.Data, info: Dict[str, Any]) -> float:
+    return self.lambda_q * jp.square(data.qvel[self._robot_qposadr]).sum()
+  
+  def _r_smooth(self, action: jp.array, info: Dict[str, Any]) -> float:
+    norm = jp.linalg.norm(action-self.last_action)
+    return self.lambda_s * norm
+  
+  def _r_neutral(self, data: mjx.Data, info: Dict[str, Any]) -> float:
+    norm = jp.linalg.norm(data.qpos[self._robot_qposadr] - self._init_q)
+    return self.lambda_n * norm
+  
+  def _r_limit(self, data: mjx.Data, info: Dict[str, Any]) -> float:
+    q_dif_min = data.qpos[self._robot_qposadr] - self.q_min
+    q_dif_max = data.qpos[self._robot_qposadr] - self.q_max
+    q_dif = jp.minimum(q_dif_min, q_dif_max)
+    return self.lambda_l * jp.exp(-30*jp.square(q_dif)).sum()
+  
+  def _r_col(self, data: mjx.Data, info: Dict[str, Any]) -> float:
+    if data.xpos[self._endeffector_body][2] < 0.02:
+       return self.lambda_c
+    else:
+       return 0
 
 
 import os
