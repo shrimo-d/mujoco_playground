@@ -14,14 +14,18 @@ from mujoco_playground._src.mjx_env import State  # pylint: disable=g-importing-
 import numpy as np
 
 INIT_POS = [0.5, 0, 0]
-
+#Endeffector info
 ENDEFFECTOR_HEIGHT = 0.07 #m = 70 mm
+ENDEFFECTOR_HALFLENGTH = 0.03
+ENDEFFECTOR_HALFWIDTH = 0.005
 
+#Size thresholds
 MIN_SIZE = 0.005 #MuJoCo uses half sizes
 MAX_SIZE = 0.05
-
+#Mass thresholds
 MIN_MASS = 0.01
 MAX_MASS = 20
+#Friction thresholds
 MIN_SLIDE = 0.5
 MAX_SLIDE = 2.0
 MIN_ROLL = 0.01
@@ -58,15 +62,15 @@ def default_config() -> config_dict.ConfigDict:
 
 class PandaPush(panda.PandaBase):
   """Bring a box to a target."""
-  geometries = ["box", "capsule", "sphere"]
-  lambda_c = 0
-  lambda_l = 0
-  lambda_s = 0
-  lambda_n = 0
-  lambda_q = 0
-  lambda_e = 0
-  lambda_r = 0
-  epsilon = 0
+  geometries = ["box", "capsule", "sphere"] #Order should not be changed, as it would break _get_mask, and therefore _get_obs
+  lambda_c = 1
+  lambda_l = 1
+  lambda_s = 1
+  lambda_n = 1
+  lambda_q = 1
+  lambda_e = 1
+  lambda_r = 1
+  epsilon = 0.001
 
   def __init__(
       self,
@@ -97,6 +101,9 @@ class PandaPush(panda.PandaBase):
       self._mj_model.sensor(f"endeffector_{name}_floor_found").id
       for name in ["head", "stick"]
     ]
+    # Read out the range of the joints of robot
+    self.q_min = self.mj_model.jnt_range[:7, 0]
+    self.q_max = self.mj_model.jnt_range[:7, 1]
     # Init last action
     self.last_action = jp.zeros(7)
 
@@ -228,22 +235,21 @@ class PandaPush(panda.PandaBase):
 
     data = mjx_env.step(self._mjx_model, state.data, ctrl, self.n_substeps)
 
-    #raw_rewards = self._get_reward(data, state.info)
-    #rewards = {
-    #    k: v * self._config.reward_config.scales[k]
-    #    for k, v in raw_rewards.items()
-    #}
-    #reward = jp.clip(sum(rewards.values()), -1e4, 1e4)
-    reward = 1
+    rewards = self._get_reward(data, state.info, action)
+
+    reward = jp.clip(sum(rewards.values()), -1e4, 1e4)
+    print(f"Reward: {reward}")
+    print(f"Rewards: {rewards}")
+
     box_pos = data.xpos[self._obj_body]
     out_of_bounds = jp.any(jp.abs(box_pos) > 1.0)
     out_of_bounds |= box_pos[2] < 0.0
     done = out_of_bounds | jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any()
     done = done.astype(float)
 
-    #state.metrics.update(
-    #    **raw_rewards, out_of_bounds=out_of_bounds.astype(float)
-    #)
+    state.metrics.update(
+        **rewards, out_of_bounds=out_of_bounds.astype(float)
+    )
 
     obs = self._get_obs(data, state.info)
     state = State(data, obs, reward, done, state.metrics, state.info)
@@ -253,42 +259,27 @@ class PandaPush(panda.PandaBase):
 
     return state
 
-  def _get_reward(self, data: mjx.Data, info: Dict[str, Any]) -> Dict[str, Any]:
-    target_pos = info["target_pos"]
-    box_pos = data.xpos[self._obj_body]
-    gripper_pos = data.site_xpos[self._gripper_site]
-    pos_err = jp.linalg.norm(target_pos - box_pos)
-    box_mat = data.xmat[self._obj_body]
-    target_mat = math.quat_to_mat(data.mocap_quat[self._mocap_target])
-    rot_err = jp.linalg.norm(target_mat.ravel()[:6] - box_mat.ravel()[:6])
-
-    box_target = 1 - jp.tanh(5 * (0.9 * pos_err + 0.1 * rot_err))
-    gripper_box = 1 - jp.tanh(5 * jp.linalg.norm(box_pos - gripper_pos))
-    robot_target_qpos = 1 - jp.tanh(
-        jp.linalg.norm(
-            data.qpos[self._robot_arm_qposadr]
-            - self._init_q[self._robot_arm_qposadr]
-        )
-    )
-
-    # Check for collisions with the floor
-    hand_floor_collision = [
-        data.sensordata[self._mj_model.sensor_adr[sensor_id]] > 0
-        for sensor_id in self._floor_hand_found_sensor
-    ]
-    floor_collision = sum(hand_floor_collision) > 0
-    no_floor_collision = (1 - floor_collision).astype(float)
-
-    info["reached_box"] = 1.0 * jp.maximum(
-        info["reached_box"],
-        (jp.linalg.norm(box_pos - gripper_pos) < 0.012),
-    )
+  def _get_reward(self, data: mjx.Data, info: Dict[str, Any], action: jax.Array) -> Dict[str, Any]:
+    #rew_push:
+    r_dist = self._r_dist(data, info)
+    r_exact = self._r_exact(data, info)
+    r_push = self._r_push(data, info)
+    #pen_push:
+    r_vel = self._r_vel(data, info)
+    r_smooth = self._r_smooth(action, info)
+    r_neutral = self._r_neutral(data, info)
+    r_limit = self._r_limit(data, info)
+    r_col = self._r_col(data, info)
 
     rewards = {
-        "gripper_box": gripper_box,
-        "box_target": box_target * info["reached_box"],
-        "no_floor_collision": no_floor_collision,
-        "robot_target_qpos": robot_target_qpos,
+        "r_dist": r_dist,
+        "r_exact": r_exact,
+        "r_push": r_push,
+        "-r_vel": -r_vel,
+        "-r_smooth": -r_smooth,
+        "-r_neutral": -r_neutral,
+        "-r_limit": -r_limit,
+        "-r_col": -r_col
     }
     return rewards
   
@@ -318,28 +309,15 @@ class PandaPush(panda.PandaBase):
     return mask
   
   def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
-    print(data.xpos[self._endeffector_body])
-    for id in self._floor_endeffector_found_sensor:
-       if data.sensordata[id] > 0:
-          print(f"{id} touched the floor!")
-    print(data)
-    #gripper_pos = data.site_xpos[self._gripper_site] #probably irrelevant for push task, as gripper is assumed fixed?
-    #gripper_mat = data.site_xmat[self._gripper_site].ravel() #probably also irrelevant?
-    target_mat = math.quat_to_mat(data.mocap_quat[self._mocap_target])
     #Mask out all unused objects from qpos and qvel
     qpos_mask = self._get_mask(data.qpos.shape)
     qvel_mask = self._get_mask(data.qvel.shape, qvel=True)
 
     obs = jp.concatenate([
-        data.qpos[qpos_mask],
-        data.qvel[qvel_mask],
-        #gripper_pos,
-        #gripper_mat[3:],
-        data.xmat[self._obj_body].ravel()[3:],
-        #data.xpos[self._obj_body] - data.site_xpos[self._gripper_site],
-        info["target_pos"] - data.xpos[self._obj_body],
-        target_mat.ravel()[:6] - data.xmat[self._obj_body].ravel()[:6],
-        data.ctrl - data.qpos[self._robot_qposadr],
+        data.qpos[qpos_mask], #First 7 entries: robot joint pos., last 7 entries: x,y,z coordinates + quaternion of object
+        data.qvel[qvel_mask], #First 7 entries are robot joint velocities, last 6 entries linear velocities followed by angular velocities of object
+        self.last_action, #Last action performed
+        info["target_pos"][:2], #x, y coordinate of target_pos
     ])
 
     return obs
@@ -414,7 +392,8 @@ class PandaPush(panda.PandaBase):
        return 0
   
   def _r_push(self, data: mjx.Data, info: Dict[str, Any]) -> float:
-    obj_goal = jp.square(data.qpos[self._obj_qposadr:self._obj_qposadr+3] - info["target_pos"]).sum()
+    """Distance of the xand y coordinate of object to the target's x and y coordinate"""
+    obj_goal = jp.square(data.qpos[self._obj_qposadr:self._obj_qposadr+2] - info["target_pos"][:2]).sum()
     return self.lambda_r / (1+obj_goal)
 
   def _r_vel(self, data: mjx.Data, info: Dict[str, Any]) -> float:
@@ -425,7 +404,7 @@ class PandaPush(panda.PandaBase):
     return self.lambda_s * norm
   
   def _r_neutral(self, data: mjx.Data, info: Dict[str, Any]) -> float:
-    norm = jp.linalg.norm(data.qpos[self._robot_qposadr] - self._init_q)
+    norm = jp.linalg.norm(data.qpos[self._robot_qposadr] - self._init_q[:7])
     return self.lambda_n * norm
   
   def _r_limit(self, data: mjx.Data, info: Dict[str, Any]) -> float:
@@ -435,7 +414,19 @@ class PandaPush(panda.PandaBase):
     return self.lambda_l * jp.exp(-30*jp.square(q_dif)).sum()
   
   def _r_col(self, data: mjx.Data, info: Dict[str, Any]) -> float:
-    if data.xpos[self._endeffector_body][2] < 0.02:
+    p_ee = data.xpos[self._endeffector_body]
+    print(p_ee)
+    R_ee = data.xmat[self._endeffector_body].reshape(3,3)
+    #Compute the positions of the 4 corners and take the min
+    ee_corners = jp.array([
+       [-ENDEFFECTOR_HALFLENGTH, -ENDEFFECTOR_HALFWIDTH, -ENDEFFECTOR_HEIGHT],
+       [-ENDEFFECTOR_HALFLENGTH, ENDEFFECTOR_HALFWIDTH, -ENDEFFECTOR_HEIGHT],
+       [ENDEFFECTOR_HALFLENGTH, -ENDEFFECTOR_HALFWIDTH, -ENDEFFECTOR_HEIGHT],
+       [ENDEFFECTOR_HALFLENGTH, ENDEFFECTOR_HALFWIDTH, -ENDEFFECTOR_HEIGHT]
+    ])
+    corners = p_ee + (R_ee @ ee_corners.T).T
+    min_z = corners[:, 2].min()
+    if min_z < 0.01:
        return self.lambda_c
     else:
        return 0

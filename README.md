@@ -46,7 +46,8 @@ pip install playground
 5. Install CUDA 12 jax: `uv pip install -U "jax[cuda12]"`
     * Verify GPU backend: `python -c "import jax; print(jax.default_backend())"` should print gpu
 6. Install playground: `uv pip install -e ".[all]"`
-7. Verify installation (and download Menagerie): `python -c "import mujoco_playground"`
+7. Verify installation: `python -c "import mujoco_playground"`
+8. Install Menagerie: `python -c "from mujoco_playground._src.mjx_env import ensure_menagerie_exists as m; m()"`
 
 #### Madrona-MJX (optional)
 
