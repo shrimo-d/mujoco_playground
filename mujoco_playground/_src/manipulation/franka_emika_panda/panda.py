@@ -42,6 +42,10 @@ def get_assets() -> Dict[str, bytes]:
   assets = {}
   path = mjx_env.ROOT_PATH / "manipulation" / "franka_emika_panda" / "xmls"
   mjx_env.update_assets(assets, path, "*.xml")
+  path = mjx_env.ROOT_PATH / "manipulation" / "franka_emika_panda" / "assets"
+  #Check if path to assets in manipulation/franka_emika_panda exist and add stl files to assets
+  if path.exists():
+    mjx_env.update_assets(assets, path, "*.stl")
   path = mjx_env.MENAGERIE_PATH / _MENAGERIE_FRANKA_DIR
   mjx_env.update_assets(assets, path, "*.xml")
   mjx_env.update_assets(assets, path / "assets")

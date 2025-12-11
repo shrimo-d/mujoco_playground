@@ -43,16 +43,25 @@ def default_config() -> config_dict.ConfigDict:
       action_scale=0.04,
       reward_config=config_dict.create(
           scales=config_dict.create(
-              # Gripper goes to the box.
-              gripper_box=4.0,
-              # Box goes to the target mocap.
-              box_target=8.0,
-              # Do not collide the gripper with the floor.
-              no_floor_collision=0.25,
-              # Arm stays close to target pose.
-              robot_target_qpos=0.3,
+              # r_dist
+              r_dist = 1.0,
+              # r_exact
+              r_exact = 1.0,
+              # r_push
+              r_push = 1.0,
+              # r_vel
+              r_vel = -1.0,
+              #r_smooth
+              r_smooth = -1.0,
+              #r_neutral
+              r_neutral = -1.0,
+              #r_limit
+              r_limit = -1.0,
+              #r_col
+              r_col = -1.0
           )
       ),
+      r_exact_epsilon = 0.001,
       impl='jax',
       nconmax=24 * 8192,
       njmax=128,
@@ -63,23 +72,19 @@ def default_config() -> config_dict.ConfigDict:
 class PandaPush(panda.PandaBase):
   """Bring a box to a target."""
   geometries = ["box", "capsule", "sphere"] #Order should not be changed, as it would break _get_mask, and therefore _get_obs
-  lambda_c = 1
-  lambda_l = 1
-  lambda_s = 1
-  lambda_n = 1
-  lambda_q = 1
-  lambda_e = 1
-  lambda_r = 1
   epsilon = 0.001
 
   def __init__(
       self,
       config: config_dict.ConfigDict = default_config(),
       config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
-      sample_orientation: bool = False,
+      geometry_randomization: bool = True,
       domain_randomization: bool = True,
       geometry: str = "box",
   ):
+    """If domain_randomization = True the environment will randomly draw from the possible geometries on each reset; if false
+    the object geometry will always be the shape supplied in the geometry attribute. Shapes can also be changed manually by calling _set_obj_geom()
+    before calling reset()"""
     xml_path = (
         mjx_env.ROOT_PATH
         / "manipulation"
@@ -93,8 +98,9 @@ class PandaPush(panda.PandaBase):
         config_overrides,
     )
     self._post_init(obj_name=geometry, keyframe="home") #this method overides the _post_init of the base panda env.
-    self._sample_orientation = sample_orientation
     self._domain_randomization = domain_randomization
+    self._geometry_randomization = geometry_randomization
+    self._geometry_name = geometry
 
     # Contact sensor IDs.
     self._floor_endeffector_found_sensor = [
@@ -164,11 +170,15 @@ class PandaPush(panda.PandaBase):
     height_offset = 0
     quat = jp.array([1,0,0,0], dtype=float)
 
+    if self._geometry_randomization:
+       geom_idx = jax.random.choice(rng_box, len(self.geometries))
+       geom = self.geometries[geom_idx]
+       self._set_obj_geom(geom)
+
     if self._domain_randomization:
-        geom_idx = jax.random.choice(rng_box, len(self.geometries))
-        geom = self.geometries[geom_idx]
-        self._set_obj_geom(geom)
         height_offset, quat = self._randomize_domain(geom, rng_box)
+    else:
+       height_offset = self._mj_model.geom(self._geometry_name).size[0] if self._geometry_name!="box" else self._mj_model.geom(self._geometry_name).size[-1]
 
     # intialize object position
     obj_pos = (
@@ -235,20 +245,25 @@ class PandaPush(panda.PandaBase):
 
     data = mjx_env.step(self._mjx_model, state.data, ctrl, self.n_substeps)
 
-    rewards = self._get_reward(data, state.info, action)
-
+    raw_rewards = self._get_reward(data, state.info, action)
+    rewards = {
+       k: v * self._config.reward_config.scales[k]
+       for k, v in raw_rewards.items()
+    }
     reward = jp.clip(sum(rewards.values()), -1e4, 1e4)
-    print(f"Reward: {reward}")
-    print(f"Rewards: {rewards}")
-
-    box_pos = data.xpos[self._obj_body]
-    out_of_bounds = jp.any(jp.abs(box_pos) > 1.0)
-    out_of_bounds |= box_pos[2] < 0.0
-    done = out_of_bounds | jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any()
+    #Done criterion
+    #Object is very close to the mocap x,y coordinates AND velocity of object is not too high
+    obj_pos = data.xpos[self._obj_body]
+    goal_pos = data.mocap_pos[self._mocap_target][0, :2]#[:2]
+    distance = jp.linalg.norm(obj_pos[:2]-goal_pos)
+    close_enough = distance < 0.001 #1mm distance from target
+    out_of_bounds = jp.any(jp.abs(obj_pos) > 1.0)
+    out_of_bounds |= obj_pos[2] < 0.0
+    done = out_of_bounds | jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any() | close_enough
     done = done.astype(float)
 
     state.metrics.update(
-        **rewards, out_of_bounds=out_of_bounds.astype(float)
+        **raw_rewards, out_of_bounds=out_of_bounds.astype(float)
     )
 
     obs = self._get_obs(data, state.info)
@@ -264,7 +279,7 @@ class PandaPush(panda.PandaBase):
     r_dist = self._r_dist(data, info)
     r_exact = self._r_exact(data, info)
     r_push = self._r_push(data, info)
-    #pen_push:
+    #pen_push (scales in config should be negative for these to be treated as penalties):
     r_vel = self._r_vel(data, info)
     r_smooth = self._r_smooth(action, info)
     r_neutral = self._r_neutral(data, info)
@@ -275,11 +290,11 @@ class PandaPush(panda.PandaBase):
         "r_dist": r_dist,
         "r_exact": r_exact,
         "r_push": r_push,
-        "-r_vel": -r_vel,
-        "-r_smooth": -r_smooth,
-        "-r_neutral": -r_neutral,
-        "-r_limit": -r_limit,
-        "-r_col": -r_col
+        "r_vel": r_vel,
+        "r_smooth": r_smooth,
+        "r_neutral": r_neutral,
+        "r_limit": r_limit,
+        "r_col": r_col
     }
     return rewards
   
@@ -379,43 +394,43 @@ class PandaPush(panda.PandaBase):
       self._obj_body = self._sphere_body
       self._obj_qposadr = self._sphere_qposadr
       self._mocap_target = self._sphere_mocap
+    self._geometry_name = obj_name
 
   def _r_dist(self, data: mjx.Data, info: Dict[str, Any]) -> float:
     ee_obj = jp.square(data.xpos[self._endeffector_body] - data.xpos[self._obj_body]).sum()
-    return self.lambda_r / (1+ee_obj)
+    return 1 / (1+ee_obj)
   
   def _r_exact(self, data: mjx.Data, info: Dict[str, Any]) -> float:
     norm = jp.linalg.norm(data.xpos[self._endeffector_body]-data.xpos[self._obj_body])
-    if norm < self.epsilon:
-       return self.lambda_e + 1/(1+100*data.qvel[self._robot_qposadr])
+    if norm < self._config.r_exact_epsilon:
+       return 1 + 1/(1+100*data.qvel[self._robot_qposadr])/self._config.reward_config.scales["r_exact"]
     else:
        return 0
   
   def _r_push(self, data: mjx.Data, info: Dict[str, Any]) -> float:
     """Distance of the xand y coordinate of object to the target's x and y coordinate"""
     obj_goal = jp.square(data.qpos[self._obj_qposadr:self._obj_qposadr+2] - info["target_pos"][:2]).sum()
-    return self.lambda_r / (1+obj_goal)
+    return 1.0 / (1+obj_goal)
 
   def _r_vel(self, data: mjx.Data, info: Dict[str, Any]) -> float:
-    return self.lambda_q * jp.square(data.qvel[self._robot_qposadr]).sum()
+    return jp.square(data.qvel[self._robot_qposadr]).sum()
   
   def _r_smooth(self, action: jp.array, info: Dict[str, Any]) -> float:
     norm = jp.linalg.norm(action-self.last_action)
-    return self.lambda_s * norm
+    return norm
   
   def _r_neutral(self, data: mjx.Data, info: Dict[str, Any]) -> float:
     norm = jp.linalg.norm(data.qpos[self._robot_qposadr] - self._init_q[:7])
-    return self.lambda_n * norm
+    return norm
   
   def _r_limit(self, data: mjx.Data, info: Dict[str, Any]) -> float:
     q_dif_min = data.qpos[self._robot_qposadr] - self.q_min
     q_dif_max = data.qpos[self._robot_qposadr] - self.q_max
     q_dif = jp.minimum(q_dif_min, q_dif_max)
-    return self.lambda_l * jp.exp(-30*jp.square(q_dif)).sum()
+    return jp.exp(-30*jp.square(q_dif)).sum()
   
   def _r_col(self, data: mjx.Data, info: Dict[str, Any]) -> float:
     p_ee = data.xpos[self._endeffector_body]
-    print(p_ee)
     R_ee = data.xmat[self._endeffector_body].reshape(3,3)
     #Compute the positions of the 4 corners and take the min
     ee_corners = jp.array([
@@ -427,72 +442,6 @@ class PandaPush(panda.PandaBase):
     corners = p_ee + (R_ee @ ee_corners.T).T
     min_z = corners[:, 2].min()
     if min_z < 0.01:
-       return self.lambda_c
+       return 1.0
     else:
-       return 0
-
-
-import os
-xla_flags = os.environ.get("XLA_FLAGS", "")
-xla_flags += " --xla_gpu_triton_gemm_any=True"
-os.environ["XLA_FLAGS"] = xla_flags
-
-env = PandaPush(geometry="capsule")
-state = env.reset(jax.random.PRNGKey(210))
-traj = []
-traj.append(state)
-
-instructions = [
-   jp.array([50, 50, 0, -100, 0, 0, 0]),
-   jp.array([50, 50, 0, -100, 0, 0, 0]),
-   jp.array([50, 50, 0, -100, 0, 0, 0]),
-   jp.array([50, 50, 0, -100, 0, 0, 0]),
-   jp.array([50, 50, 0, 0, 0, 10, 0]),
-   jp.array([50, 50, 0, 0, 0, 10, 0]),
-   jp.array([100, 0, 0, 0, 0, 10, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-   jp.array([100, 0, 0, 0, 0, 0, 0]),
-]
-
-for ins in instructions:
-  state = env.step(state, ins)
-  traj.append(state)
-
-images = env.render(traj)
-import matplotlib.pyplot as plt
-
-for im in images:
-    plt.imshow(im)
-    plt.show()
+       return 0.0

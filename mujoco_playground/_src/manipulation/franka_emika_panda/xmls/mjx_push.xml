@@ -9,7 +9,7 @@
     </body>
     <body name="capsule" pos="100 101 0">
       <freejoint/>
-      <geom type="capsule" name="capsule" size="0.02 0.02" condim="3"
+      <geom type="capsule" name="capsule" size="0.02 0.02" condim="3" quat="0.7071068 0.7071068 0 0"
        friction="1 .03 .003" rgba="0 1 0 1" contype="2" conaffinity="1" solref="0.01 1"/>
     </body>
     <body name="sphere" pos="100 102 0">
@@ -22,7 +22,7 @@
       <geom type="box" name="box_target" size="0.02 0.02 0.03" rgba="1 0 0 0.2" contype="0" conaffinity="0"/>
     </body>
     <body mocap="true" name="capsule_target">
-      <geom type="capsule" name="capsule_target" size="0.02 0.02" rgba="1 0 0 0.2" contype="0" conaffinity="0"/>
+      <geom type="capsule" name="capsule_target" size="0.02 0.02" quat="0.7071068 0.7071068 0 0" rgba="1 0 0 0.2" contype="0" conaffinity="0"/>
     </body>
     <body mocap="true" name="sphere_target">
       <geom type="sphere" name="sphere_target" size="0.02" rgba="1 0 0 0.2" contype="0" conaffinity="0"/>
