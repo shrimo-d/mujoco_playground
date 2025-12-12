@@ -6,7 +6,7 @@ xla_flags = os.environ.get("XLA_FLAGS", "")
 xla_flags += " --xla_gpu_triton_gemm_any=True"
 os.environ["XLA_FLAGS"] = xla_flags
 
-env = PandaPush(geometry="capsule", geometry_randomization=False, domain_randomization=False)
+env = PandaPush(geometry="capsule", geometry_randomization=True, domain_randomization=True)
 state = env.reset(jax.random.PRNGKey(210))
 traj = []
 traj.append(state)
@@ -57,7 +57,9 @@ instructions = [
 
 for ins in instructions:
   state = env.step(state, ins)
-  print(state.data.xpos[env._obj_body], f"Size: {env._mj_model.geom('capsule').size}")
+  print(env._geometry_name, state.data.xpos[env._obj_body], f"Size: {env._mj_model.geom(env._geometry_name).size}")
+  print(env._mjx_model.geom_size[env._mj_model.geom(env._geometry_name).id])
+  print(env._mj_model.body(env._geometry_name).mass)
   traj.append(state)
 
 images = env.render(traj)
