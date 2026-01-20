@@ -25,7 +25,7 @@ def default_config() -> config_dict.ConfigDict:
   config = config_dict.create(
       ctrl_dt=0.02, #Used in MjxEnv init()
       sim_dt=0.005, #Used in MjxEnv init()
-      episode_length=150, #Not used here
+      episode_length=150,
       action_repeat=1, #Not used here
       action_scale=0.04, #Used in step()
       reward_config=config_dict.create( #Used in step()
@@ -118,8 +118,7 @@ class PandaPush(panda.PandaBase):
     # Read out the range of the joints of robot
     self.q_min = self.mj_model.jnt_range[:7, 0]
     self.q_max = self.mj_model.jnt_range[:7, 1]
-    # Init last action
-    self.last_action = jp.zeros(7)
+
 
   def _move_other_geometries_away(self, geom: str):
     if geom=="box":
@@ -146,11 +145,11 @@ class PandaPush(panda.PandaBase):
         V = np.pi * size[0]*size[0] * (2*size[1]) + 4/3 * np.pi * size[0]*size[0]*size[0] #V = Volume of cylinder + Volume of sphere
     elif geom=="sphere":
         V = np.pi * 4/3 * size[0]*size[0]*size[0]
-    return density*V  
-        
+    return float(density*V)
 
   def _randomize_domain(self, geom: str, rng: jax.random.PRNGKey):
-    quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+    res = np.zeros((4,1), dtype=np.float64)
+    quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
     if geom=="box":
         #Randomize Size (because its geometry based)
         size = jax.random.uniform(rng, (3,), minval=self._config.domain_parameters.min_size, maxval=self._config.domain_parameters.max_size)
@@ -159,37 +158,39 @@ class PandaPush(panda.PandaBase):
 
     elif geom=="capsule":
         #Randomize Size (because its geometry based)
-        size = jax.random.uniform(rng, (2,), minval=self._config.domain_parameters.min_size, maxval=self._config.domain_parameters.max_size)
+        size = jax.random.uniform(rng, (3,), minval=self._config.domain_parameters.min_size, maxval=self._config.domain_parameters.max_size)
         #Flip capsule on the side
-        quat = jp.array([jp.sqrt(0.5), jp.sqrt(0.5), 0.0, 0.0], dtype=float)
+        quat = np.array([np.sqrt(0.5), np.sqrt(0.5), 0.0, 0.0], dtype=np.float64)
         height_offset = size[0] #because capsule is defined by giving radius followed by cylinder halfheight
 
     elif geom=="sphere":
         #Randomize Size (because its geometry based)
-        size = jax.random.uniform(rng, (1,), minval=self._config.domain_parameters.min_size, maxval=self._config.domain_parameters.max_size)
+        size = jax.random.uniform(rng, (3,), minval=self._config.domain_parameters.min_size, maxval=self._config.domain_parameters.max_size)
         height_offset = size[0]
 
     #Set size
-    self._mj_model.geom(geom).size = size
-    self._mj_model.geom(f"{geom}_target").size = size
+    self._mj_model.geom(geom).size = np.array(size, dtype=np.float64)
+    self._mj_model.geom(f"{geom}_target").size = np.array(size, dtype=np.float64)
     #Randomize Mass
-    density = jax.random.uniform(rng, (1,), minval=self._config.domain_parameters.min_density, maxval=self._config.domain_parameters.max_density)
-    self._mj_model.body(geom).mass = self._compute_mass_from_density(geom, size, density)
+    density = jax.random.uniform(rng, (), minval=self._config.domain_parameters.min_density, maxval=self._config.domain_parameters.max_density)
+    mass = self._compute_mass_from_density(geom, size, float(density))
+    self._mj_model.body(geom).mass = float(mass)
     #Randomize Friction
-    self._mj_model.geom(geom).friction = jax.random.uniform(rng, 
+    self._mj_model.geom(geom).friction = np.array(jax.random.uniform(rng, 
                                                             (3,), 
                                                             minval=jp.array([self._config.domain_parameters.min_slide,
                                                                              self._config.domain_parameters.min_roll, 
                                                                              self._config.domain_parameters.min_spin]),
                                                             maxval=jp.array([self._config.domain_parameters.max_slide,
                                                                              self._config.domain_parameters.max_roll, 
-                                                                             self._config.domain_parameters.max_spin]))
+                                                                             self._config.domain_parameters.max_spin])), dtype=np.float64)
     #Randomly rotate around z-axis
-    z_quat = np.zeros((4,1))
+    z_quat = np.zeros((4,1), dtype=np.float64)
+    quat = quat.reshape((4,1))
     z_angle = jax.random.uniform(rng, (3,), minval=jp.array([0, 0, -np.pi]), maxval=jp.array([0,0,np.pi]))
     mju_euler2Quat(quat=z_quat, euler=np.array(z_angle), seq="XYZ")
-    mju_mulQuat(quat, z_quat, quat)  
-    return height_offset, jp.array(quat)
+    mju_mulQuat(res, z_quat, quat)
+    return height_offset, jp.array(res.reshape((4,)))
 
   def reset(self, rng: jax.Array) -> State:
     rng, rng_box, rng_target = jax.random.split(rng, 3)
@@ -200,12 +201,15 @@ class PandaPush(panda.PandaBase):
        geom_idx = jax.random.choice(rng_box, len(self.geometries))
        geom = self.geometries[geom_idx]
        self._set_obj_geom(geom)
+       geom_id = geom_idx.astype(jp.int32)
+    else:
+       geom_id = jp.array(self.geometries.index(self._geometry_name), dtype=jp.int32)
 
     #Move the other geometries out of range to not interfere (just to be safe)
     self._move_other_geometries_away(self._geometry_name)
 
     if self._domain_randomization:
-        height_offset, quat = self._randomize_domain(geom, rng_box)
+        height_offset, quat = self._randomize_domain(self._geometry_name, rng_box)
     else:
        height_offset = self._mj_model.geom(self._geometry_name).size[0] if self._geometry_name!="box" else self._mj_model.geom(self._geometry_name).size[-1]
     #if we changed the mj_model we need to make a new mjx_model as well
@@ -264,7 +268,12 @@ class PandaPush(panda.PandaBase):
         "out_of_bounds": jp.array(0.0, dtype=float),
         **{k: 0.0 for k in self._config.reward_config.scales.keys()},
     }
-    info = {"rng": rng, "target_pos": target_pos, "reached_box": 0.0}
+    info = {"rng": rng,
+            "target_pos": target_pos,
+            "reached_box": 0.0,
+            "geom_id": geom_id, 
+            "last_action": jp.zeros(7),
+            "t": jp.array(0, dtype=jp.int32)}
     obs = self._get_obs(data, info)
     reward, done = jp.zeros(2)
     state = State(data, obs, reward, done, metrics, info)
@@ -283,26 +292,32 @@ class PandaPush(panda.PandaBase):
        for k, v in raw_rewards.items()
     }
     reward = jp.clip(sum(rewards.values()), -1e4, 1e4)
+    #Get t (timestep)
+    t = state.info["t"] + 1
     #Done criterion
     #Object is very close to the mocap x,y coordinates AND velocity of object is not too high
     obj_pos = data.xpos[self._obj_body]
     goal_pos = data.mocap_pos[self._mocap_target][0, :2]#[:2]
     distance = jp.linalg.norm(obj_pos[:2]-goal_pos)
     close_enough = distance < 0.001 #1mm distance from target
+    time_limit = t >= self._config.episode_length
     out_of_bounds = jp.any(jp.abs(obj_pos) > 1.0)
     out_of_bounds |= obj_pos[2] < 0.0
     done = out_of_bounds | jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any() | close_enough
+    done = done | time_limit
     done = done.astype(float)
 
     state.metrics.update(
         **raw_rewards, out_of_bounds=out_of_bounds.astype(float)
     )
+    
+    #Set action as last_action for next state; set t = t+1
+    info = dict(state.info)
+    info["last_action"] = action
+    info["t"] = t
 
-    obs = self._get_obs(data, state.info)
-    state = State(data, obs, reward, done, state.metrics, state.info)
-
-    #Set action to self.last_action
-    self.last_action = action
+    obs = self._get_obs(data, info)
+    state = State(data, obs, reward, done, state.metrics, info)
 
     return state
 
@@ -330,43 +345,20 @@ class PandaPush(panda.PandaBase):
     }
     return rewards
   
-  def _get_mask(self, shape: tuple, qvel: bool = False):
-    """Creates a mask for the self.qpos and self.qvel array to exclude the unused geometries
-    Args:
-    shape: tuple -> The shape of qpos and qvel
-    qvel: bool -> Whether or not mask for qvel is wanted
-    Returns:
-    mask: jp.array -> mask of the indizes"""
-    offset = 6 if qvel else 7
-    capsule_mod = self._capsule_qposadr-1 if qvel else self._capsule_qposadr #in qvel index starts 1 earlier, as it is the second geom
-    sphere_mod = self._sphere_qposadr-2 if qvel else self._sphere_qposadr #in qvel index starts 2 earlier, as it is the third geom
-    if self._obj_body == self._box_body:
-        idx = list(range(capsule_mod, capsule_mod+offset))
-        idx.extend(list(range(sphere_mod, sphere_mod+offset)))
-    elif self._obj_body == self._capsule_body:
-        idx = list(range(self._box_qposadr, self._box_qposadr+offset))
-        idx.extend(list(range(sphere_mod, sphere_mod+offset)))
-    elif self._obj_body == self._sphere_body:
-        idx = list(range(self._box_qposadr, self._box_qposadr+offset))
-        idx.extend(list(range(capsule_mod, capsule_mod+offset)))
-    else:
-       raise Exception("self._obj_body does not contain id of legal object")
-    exclude = jp.array(idx)
-    mask = jp.ones(shape, dtype=bool).at[exclude].set(False)
-    return mask
-  
   def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
-    #Mask out all unused objects from qpos and qvel
-    qpos_mask = self._get_mask(data.qpos.shape)
-    qvel_mask = self._get_mask(data.qvel.shape, qvel=True)
+    geom_id = info["geom_id"]
+    qpos_idx = self._qpos_keep_idx[geom_id]
+    qvel_idx = self._qvel_keep_idx[geom_id]
+
+    qpos_sel = jp.take(data.qpos, qpos_idx, axis=0)
+    qvel_sel = jp.take(data.qvel, qvel_idx, axis=0)
 
     obs = jp.concatenate([
-        data.qpos[qpos_mask], #First 7 entries: robot joint pos., last 7 entries: x,y,z coordinates + quaternion of object
-        data.qvel[qvel_mask], #First 7 entries are robot joint velocities, last 6 entries linear velocities followed by angular velocities of object
-        self.last_action, #Last action performed
-        info["target_pos"][:2], #x, y coordinate of target_pos
+       qpos_sel,
+       qvel_sel,
+       info["last_action"],
+       info["target_pos"][:2],
     ])
-
     return obs
   
   def _post_init(self, obj_name: str, keyframe: str):
@@ -411,6 +403,44 @@ class PandaPush(panda.PandaBase):
     self._init_ctrl = self._mj_model.keyframe(keyframe).ctrl
     self._lowers, self._uppers = self._mj_model.actuator_ctrlrange.T
 
+    # Precompute dof addresses for all possible geometries to make it JIT compatible
+    nq = int(self._mj_model.nq)
+    nv = int(self._mj_model.nv)
+    QPOS_OBJ_LEN = 7
+    QVEL_OBJ_LEN = 6
+
+    def keep_indices(total_len, exclude_ranges):
+       exclude = np.zeros((total_len,), dtype=np.bool_)
+       for start, length in exclude_ranges:
+          exclude[start:start+length] = True
+       keep = np.nonzero(~exclude)[0].astype(np.int32)
+       return keep
+    
+    def body_freejoint_qposadr(body_name: str) -> int:
+       jadr = int(self._mj_model.body(body_name).jntadr[0])
+       return int(self._mj_model.jnt_qposadr[jadr])
+    
+    def body_freejoint_dofadr(body_name: str) -> int:
+       jadr = int(self._mj_model.body(body_name).jntadr[0])
+       return int(self._mj_model.jnt_dofadr[jadr])
+    
+    box_qpodadr = body_freejoint_qposadr("box")
+    cap_qposadr = body_freejoint_qposadr("capsule")
+    sph_qposadr = body_freejoint_qposadr("sphere")
+    box_dofadr = body_freejoint_dofadr("box")
+    cap_dofadr = body_freejoint_dofadr("capsule")
+    sph_dofadr = body_freejoint_dofadr("sphere")
+
+    qpos_keep_box = keep_indices(nq, [(cap_qposadr, QPOS_OBJ_LEN), (sph_qposadr, QPOS_OBJ_LEN)])
+    qpos_keep_cap = keep_indices(nq, [(box_qpodadr, QPOS_OBJ_LEN), (sph_qposadr, QPOS_OBJ_LEN)])
+    qpos_keep_sph = keep_indices(nq, [(box_qpodadr, QPOS_OBJ_LEN), (cap_qposadr, QPOS_OBJ_LEN)])
+    qvel_keep_box = keep_indices(nv, [(cap_dofadr, QVEL_OBJ_LEN), (sph_dofadr, QVEL_OBJ_LEN)])
+    qvel_keep_cap = keep_indices(nv, [(box_dofadr, QVEL_OBJ_LEN), (sph_dofadr, QVEL_OBJ_LEN)])
+    qvel_keep_sph = keep_indices(nv, [(box_dofadr, QVEL_OBJ_LEN), (cap_dofadr, QVEL_OBJ_LEN)])
+    #Stack into (3, K) arrays
+    self._qpos_keep_idx = jp.array(np.stack([qpos_keep_box, qpos_keep_cap, qpos_keep_sph], axis=0), dtype=jp.int32)
+    self._qvel_keep_idx = jp.array(np.stack([qvel_keep_box, qvel_keep_cap, qvel_keep_sph], axis=0), dtype=jp.int32)
+
   def _set_obj_geom(self, obj_name: str):
     if obj_name not in self.geometries:
       raise Exception(f"No geometry with name '{obj_name}' in list of supported geometries: {self.geometries}")
@@ -434,10 +464,10 @@ class PandaPush(panda.PandaBase):
   
   def _r_exact(self, data: mjx.Data, info: Dict[str, Any]) -> float:
     norm = jp.linalg.norm(data.xpos[self._endeffector_body]-data.xpos[self._obj_body])
-    if norm < self._config.r_exact_epsilon:
-       return 1 + 1/(1+100*data.qvel[self._robot_qposadr])/self._config.reward_config.scales["r_exact"]
-    else:
-       return 0
+    close = norm < self._config.r_exact_epsilon
+    q_dot_squared = jp.sum(jp.square(data.qvel[self._robot_qposadr]))
+    val = 1.0 + 1.0 / (1.0 + 100.0 * q_dot_squared) #This IS correct, because in step() it will get multiplied with self._config.reward_config.scales["r_exact"]
+    return jp.where(close, val, 0.0)
   
   def _r_push(self, data: mjx.Data, info: Dict[str, Any]) -> float:
     """Distance of the xand y coordinate of object to the target's x and y coordinate"""
@@ -448,7 +478,7 @@ class PandaPush(panda.PandaBase):
     return jp.square(data.qvel[self._robot_qposadr]).sum()
   
   def _r_smooth(self, action: jp.array, info: Dict[str, Any]) -> float:
-    norm = jp.linalg.norm(action-self.last_action)
+    norm = jp.linalg.norm(action-info["last_action"])
     return norm
   
   def _r_neutral(self, data: mjx.Data, info: Dict[str, Any]) -> float:
@@ -473,7 +503,4 @@ class PandaPush(panda.PandaBase):
     ])
     corners = p_ee + (R_ee @ ee_corners.T).T
     min_z = corners[:, 2].min()
-    if min_z < 0.01:
-       return 1.0
-    else:
-       return 0.0
+    return jp.where(min_z < 0.01, 1.0, 0.0)
