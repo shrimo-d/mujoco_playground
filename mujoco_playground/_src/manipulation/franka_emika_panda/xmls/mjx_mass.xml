@@ -1,0 +1,20 @@
+<mujoco model="panda mass">
+  <include file="mjx_scene_mass.xml"/>
+
+  <worldbody>
+    <body name="target" pos="0.7 -0.2 0.0255">
+      <geom type="box" name="box_target" size="0.025 0.025 0.025" rgba="1 0 0 0.2" contype="0" conaffinity="0"/>
+    </body>
+  </worldbody>
+
+  <keyframe>
+    <key name="home"
+      qpos="0 0.3 0 -1.57079 0 2.0 -0.7853"
+      ctrl="0 0.3 0 -1.57079 0 2.0 -0.7853"/>
+    <key name="target"
+      qpos="-0.5312494 1.0240724 0.333755 -1.3530021 -0.38937205 2.3126993 -0.8678456"/>
+  </keyframe>
+
+  <include file="sensor_mass.xml"/>
+
+</mujoco>
