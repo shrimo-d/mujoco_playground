@@ -149,7 +149,6 @@ class PandaTransportMass(panda.PandaBase):
 
     # initialize env state and info
     metrics = {
-        "out_of_bounds": jp.array(0.0, dtype=float),
         **{k: 0.0 for k in self._config.reward_config.scales.keys()},
     }
     info = {"rng": rng, "reached_box": 0.0, "start_pos": spawn_q, "last_action": jp.zeros(7)}
@@ -180,7 +179,7 @@ class PandaTransportMass(panda.PandaBase):
     done = done.astype(float)
 
     state.metrics.update(
-        **raw_rewards, out_of_bounds=0
+        **raw_rewards
     )
     #update info
     info = dict(state.info)
@@ -217,7 +216,6 @@ class PandaTransportMass(panda.PandaBase):
         "p_smooth": r_smooth,
         "p_floor_collision": no_floor_collision,
     }
-    print(rewards)
     return rewards
 
   def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
@@ -254,7 +252,7 @@ class PandaTransportMass(panda.PandaBase):
     """Takes a state and sets the mass of the payload to the given mass.
     Returns a new state with the correct mass.
     Should only be used directly after reset, because metrics might be wonky otherwise..."""
-    self._mj_model.body("payload").mass = mass
+    #self._mj_model.body("payload").mass = mass
     payload_id = self._mj_model.body("payload").id
     mjx_model = self._mjx_model.replace(
       body_mass=self._mjx_model.body_mass.at[payload_id].set(mass)
