@@ -27,6 +27,7 @@ from mujoco_playground._src.manipulation.franka_emika_panda.panda import _ARM_JO
 from mujoco_playground._src.manipulation.franka_emika_panda import panda_kinematics
 from mujoco_playground._src.mjx_env import State  # pylint: disable=g-importing-member
 import numpy as np
+from flax.struct import dataclass
 
 #Position of where EE should be moved
 TARGET_POS = [0.7, -0.2, 0.0255]
@@ -81,6 +82,13 @@ def random_rotation_z(key):
     [s,  c, 0.0],
     [0.0, 0.0, 1.0],
   ])
+
+#seher uses an action_spec attribute which in dm_control.suite is an BoundedArray Object
+#This mimics that, such that the mujoco_playground wrapper in seher is compatible with this env
+@dataclass
+class ActionSpec:
+  minimum: jax.Array
+  maximum: jax.Array
 
 
 class PandaTransportMass(panda.PandaBase):
@@ -336,6 +344,10 @@ class PandaTransportMass(panda.PandaBase):
   
   def _r_smooth(self, action: jax.Array, info: Dict[str, Any]) -> float:
     return jp.linalg.norm(action - info["last_action"])
+  
+  @property
+  def action_spec(self):
+    return ActionSpec(minimum=self._lowers, maximum=self._uppers)
 
   #def get_target_qpos(slef, key, q_actual, n_tries=128):
   #  target_payload_pos = jp.array(TARGET_POS)
